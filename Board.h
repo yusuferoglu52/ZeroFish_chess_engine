@@ -80,16 +80,23 @@ struct Board {
         uint8_t  captured;
         uint8_t  capturedColor;
     };
-    static constexpr int MAX_DEPTH = 128;
-    UndoInfo undoStack[MAX_DEPTH];
+    static constexpr int MAX_DEPTH = 128;          // search-ply bound (killers / iterative deepening)
+    static constexpr int UNDO_STACK_SIZE = 4096;   // game history + deepest search recursion
+    UndoInfo undoStack[UNDO_STACK_SIZE];
     int      undoTop;
 
     std::string toFEN() const;
 };
 
 // Bit manipulation utilities
+#if defined(_MSC_VER)
+#include <intrin.h>
+inline int  lsb(uint64_t b)       { unsigned long i; _BitScanForward64(&i, b); return (int)i; }
+inline int  popcount(uint64_t b)  { return (int)__popcnt64(b); }
+#else
 inline int  lsb(uint64_t b)       { return __builtin_ctzll(b); }
 inline int  popcount(uint64_t b)  { return __builtin_popcountll(b); }
+#endif
 inline int  popLSB(uint64_t& b)   { int sq=lsb(b); b&=b-1; return sq; }
 inline uint64_t bit(int sq)       { return 1ULL<<sq; }
 
