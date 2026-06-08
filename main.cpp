@@ -72,6 +72,30 @@ static int runPerft() {
     return (passed == total) ? 0 : 1;
 }
 
+// Positions with tactical tension (hanging/defended pieces, both sides to move)
+// so the eval-equivalence check actually exercises evalThreats in both directions.
+static const char* kEvalFens[] = {
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1",
+    "2r2rk1/1bqnbppp/p3pn2/1p2N3/3P4/1BN1P3/PPQ2PPP/2RR2K1 w - - 0 18",
+    "r2q1rk1/pp2bppp/2n1pn2/2bp4/2P5/2NP1NP1/PP2PPBP/R1BQ1RK1 b - - 0 10",
+    "rnb1kbnr/pp1ppppp/8/q1p5/8/2N5/PPPPPPPP/R1BQKBNR w KQkq - 2 3",
+    "4k3/8/8/3qQ3/8/8/8/4K3 w - - 0 1",
+};
+
+static void runEval() {
+    Evaluator ev;
+    std::cout << "== Eval (side-to-move perspective) ==\n";
+    const int n = (int)(sizeof(kEvalFens) / sizeof(kEvalFens[0]));
+    for (int i = 0; i < n; i++) {
+        Board b;
+        b.parseFEN(kEvalFens[i]);
+        std::cout << i << ": " << ev.evaluate(b) << "\n";
+    }
+}
+
 static const SuitePos kBenchSuite[] = {
     {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "Start", ""},
     {"r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4", "Italian", ""},
@@ -256,7 +280,7 @@ int main(int argc, char** argv) {
     Engine engine;
     engine.verbose = false;
 
-    bool doBench = false, doReg = false, doTune = false, doValidateBook = false, doPerft = false;
+    bool doBench = false, doReg = false, doTune = false, doValidateBook = false, doPerft = false, doEval = false;
     int timeMs = 1200;
     long long nodes = 600000;
     int depth = 0; // 0 => auto
@@ -264,6 +288,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--bench") == 0) doBench = true;
         else if (std::strcmp(argv[i], "--perft") == 0) doPerft = true;
+        else if (std::strcmp(argv[i], "--eval") == 0) doEval = true;
         else if (std::strcmp(argv[i], "--regress") == 0) doReg = true;
         else if (std::strcmp(argv[i], "--tune") == 0) doTune = true;
         else if (std::strcmp(argv[i], "--validate-book") == 0) doValidateBook = true;
@@ -278,12 +303,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!doBench && !doReg && !doTune && !doValidateBook && !doPerft) {
-        std::cout << "Usage: chess_engine [--perft] [--bench] [--regress] [--tune] [--validate-book]"
+    if (!doBench && !doReg && !doTune && !doValidateBook && !doPerft && !doEval) {
+        std::cout << "Usage: chess_engine [--perft] [--eval] [--bench] [--regress] [--tune] [--validate-book]"
                   << " [--time ms] [--nodes n] [--depth d] [--book-file path]\n";
         std::cout << "Default quick run:\n";
         runBench(engine, 1000, 500000);
         return 0;
+    }
+
+    if (doEval) {
+        runEval();
+        if (!doBench && !doReg && !doTune && !doValidateBook && !doPerft) return 0;
     }
 
     if (doPerft) {

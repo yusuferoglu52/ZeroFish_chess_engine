@@ -22,7 +22,9 @@ private:
     static uint64_t rayAtk(int sq, uint64_t occ, int df, int dr);
     uint64_t rookAtk  (int sq, uint64_t occ) const;
     uint64_t bishopAtk(int sq, uint64_t occ) const;
-    bool isSquareAttacked(const Board& b, int sq, Color by) const;
+
+    // Full attack bitboard for one color (computed once per evaluate, reused by threats).
+    uint64_t allAttacks(const Board& b, Color by) const;
 
     int calcPhase(const Board& b) const;
 
@@ -38,6 +40,6 @@ private:
     int evalKingSafety   (const Board& b, Color c) const;
     int evalBishopPair   (const Board& b, Color c) const;
     int evalOutposts     (const Board& b, Color c) const;
-    int evalThreats      (const Board& b, Color c) const;
+    int evalThreats      (const Board& b, Color c, uint64_t attByC, uint64_t attByThem) const;
     int evalSpace        (const Board& b, Color c) const;
 };
