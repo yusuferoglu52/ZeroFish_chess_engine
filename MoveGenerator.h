@@ -18,6 +18,10 @@ public:
     // Is square attacked by any piece of 'by' color?
     bool isSquareAttacked(const Board& board, int sq, Color by) const;
 
+    // Bitboard of every piece (both colors) attacking 'sq' for a given occupancy.
+    // Used by the engine's static exchange evaluation.
+    uint64_t attackersTo(const Board& board, int sq, uint64_t occ) const;
+
 private:
     // Pre-computed attack tables
     uint64_t knightAttacks[64];

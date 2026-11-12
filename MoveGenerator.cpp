@@ -82,6 +82,22 @@ bool MoveGenerator::isInCheck(const Board& b, Color c) const {
     return isSquareAttacked(b,ks,(Color)(1-c));
 }
 
+// All attackers (both colors) of square 's' for a given occupancy.
+uint64_t MoveGenerator::attackersTo(const Board& b, int s, uint64_t occ) const {
+    uint64_t att = 0;
+    att |= knightAttacks[s]      & (b.pieces[WHITE][KNIGHT] | b.pieces[BLACK][KNIGHT]);
+    att |= kingAttacks[s]        & (b.pieces[WHITE][KING]   | b.pieces[BLACK][KING]);
+    att |= pawnAttacks[BLACK][s] &  b.pieces[WHITE][PAWN];   // white pawns attacking s
+    att |= pawnAttacks[WHITE][s] &  b.pieces[BLACK][PAWN];   // black pawns attacking s
+    uint64_t ra = rookAttacks(s, occ);
+    uint64_t ba = bishopAttacks(s, occ);
+    att |= ra & (b.pieces[WHITE][ROOK]   | b.pieces[BLACK][ROOK]
+               | b.pieces[WHITE][QUEEN]  | b.pieces[BLACK][QUEEN]);
+    att |= ba & (b.pieces[WHITE][BISHOP] | b.pieces[BLACK][BISHOP]
+               | b.pieces[WHITE][QUEEN]  | b.pieces[BLACK][QUEEN]);
+    return att;
+}
+
 // ---- Pawn moves ----
 void MoveGenerator::genPawnMoves(const Board& b, Color us, std::vector<Move>& ml, bool capturesOnly) const {
     Color them=(Color)(1-us);

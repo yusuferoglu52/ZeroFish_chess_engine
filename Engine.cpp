@@ -3,6 +3,23 @@
 #include <cstring>
 #include <iostream>
 #include <cmath>
+#include <utility>
+
+namespace {
+// Mate scores must be stored relative to the current node, not the root, or a TT
+// hit at a different ply reports the wrong mate distance. Adjust on store/probe.
+constexpr int MATE_THRESHOLD = Engine::MATE_SCORE - 1000;
+inline int scoreToTT(int score, int ply) {
+    if (score >=  MATE_THRESHOLD) return score + ply;
+    if (score <= -MATE_THRESHOLD) return score - ply;
+    return score;
+}
+inline int scoreFromTT(int score, int ply) {
+    if (score >=  MATE_THRESHOLD) return score - ply;
+    if (score <= -MATE_THRESHOLD) return score + ply;
+    return score;
+}
+} // namespace
 
 Engine::Engine() : tt(TT_SIZE) {
     clearKillers();
@@ -72,94 +89,49 @@ bool Engine::hasNonPawnMaterial(const Board& board, Color side) const {
             board.pieces[side][ROOK]   | board.pieces[side][QUEEN]) != 0ULL;
 }
 
-bool Engine::attacksSquare(const Board& board, int from, PieceType pt, Color side, int target) const {
-    int ff = ::file(from), fr = rank(from);
-    int tf = ::file(target), tr = rank(target);
-    int df = tf - ff, dr = tr - fr;
-    int adf = std::abs(df), adr = std::abs(dr);
-
-    auto clearRay = [&](int stepF, int stepR) -> bool {
-        int nf = ff + stepF, nr = fr + stepR;
-        while (nf != tf || nr != tr) {
-            if (board.allOccupied & bit(::sq(nf, nr))) return false;
-            nf += stepF; nr += stepR;
-        }
-        return true;
-    };
-
-    switch (pt) {
-        case PAWN:
-            return (side == WHITE) ? (dr == 1 && adf == 1) : (dr == -1 && adf == 1);
-        case KNIGHT:
-            return (adf == 1 && adr == 2) || (adf == 2 && adr == 1);
-        case BISHOP:
-            return adf == adr && clearRay((df > 0) ? 1 : -1, (dr > 0) ? 1 : -1);
-        case ROOK:
-            if (df == 0 && dr != 0) return clearRay(0, (dr > 0) ? 1 : -1);
-            if (dr == 0 && df != 0) return clearRay((df > 0) ? 1 : -1, 0);
-            return false;
-        case QUEEN:
-            if (adf == adr) return clearRay((df > 0) ? 1 : -1, (dr > 0) ? 1 : -1);
-            if (df == 0 && dr != 0) return clearRay(0, (dr > 0) ? 1 : -1);
-            if (dr == 0 && df != 0) return clearRay((df > 0) ? 1 : -1, 0);
-            return false;
-        case KING:
-            return adf <= 1 && adr <= 1;
-        default:
-            return false;
-    }
-}
-
-bool Engine::isLegalRecapture(Board& board, const Move& m, Color side) {
-    board.makeMove(m);
-    bool legal = !moveGen.isInCheck(board, side);
-    board.unmakeMove(m);
-    return legal;
-}
-
+// Static exchange evaluation via the classical swap algorithm. Operates purely on a
+// local occupancy mask — no Board copy, no make/unmake — so it is cheap enough to call
+// during move ordering. (Pins are ignored, which is standard for SEE.)
 int Engine::seeCapture(Board& board, const Move& m) {
     if (m.enPassant || m.captured == NO_PIECE) return 0;
 
-    Board tmp = board;
-    int gain[32]{};
-    int depth = 0;
-    gain[0] = SEE_VALUE[m.captured];
-    int target = m.to;
+    const int to = m.to;
+    int gain[32];
+    int d = 0;
 
-    tmp.makeMove(m);
-    Color side = tmp.sideToMove;
+    uint64_t occ = board.allOccupied ^ bit(m.from); // moving piece leaves its origin
+    PieceType onSquare = (PieceType)m.piece;         // piece value now standing on 'to'
+    gain[0] = SEE_VALUE[m.captured];
+    Color side = (Color)(1 - board.sideToMove);      // side to recapture next
 
     while (true) {
-        int bestFrom = -1;
-        PieceType bestPt = NO_PIECE;
-        for (int pt = PAWN; pt <= KING && bestFrom == -1; pt++) {
-            uint64_t bb = tmp.pieces[side][pt];
-            while (bb) {
-                int from = popLSB(bb);
-                if (!attacksSquare(tmp, from, (PieceType)pt, side, target)) continue;
-                Move rec((uint8_t)from, (uint8_t)target, (uint8_t)pt, tmp.pieceOn[target]);
-                if (!isLegalRecapture(tmp, rec, side)) continue;
-                bestFrom = from;
-                bestPt = (PieceType)pt;
-                break;
-            }
+        uint64_t attackers = moveGen.attackersTo(board, to, occ) & occ;
+        uint64_t sideAtt   = attackers & board.occupied[side];
+        if (!sideAtt) break;
+
+        // Least valuable attacker for the side to move.
+        PieceType lva = KING;
+        uint64_t  lvaBit = 0;
+        for (int pt = PAWN; pt <= KING; pt++) {
+            uint64_t b = sideAtt & board.pieces[side][pt];
+            if (b) { lva = (PieceType)pt; lvaBit = b & (0ULL - b); break; }
         }
 
-        if (bestFrom == -1) break;
-        if (depth + 1 >= 31) break;
+        // A king may only capture if the defender has no attacker left on the square.
+        if (lva == KING && (attackers & board.occupied[1 - side])) break;
 
-        depth++;
-        gain[depth] = SEE_VALUE[tmp.pieceOn[target]] - gain[depth - 1];
-        Move rec((uint8_t)bestFrom, (uint8_t)target, (uint8_t)bestPt, tmp.pieceOn[target]);
-        tmp.makeMove(rec);
-        side = tmp.sideToMove;
+        if (d + 1 >= 32) break;
+        d++;
+        gain[d] = SEE_VALUE[onSquare] - gain[d - 1];
+        onSquare = lva;
+        occ ^= lvaBit;                                // remove that attacker
+        side = (Color)(1 - side);
     }
 
-    while (depth > 0) {
-        gain[depth - 1] = -std::max(-gain[depth - 1], gain[depth]);
-        depth--;
+    while (d > 0) {
+        gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+        d--;
     }
-
     return gain[0];
 }
 
@@ -167,7 +139,7 @@ void Engine::orderMoves(std::vector<Move>& moves, Board& board,
                         const Move* ttMove, int ply)
 {
     Color us = board.sideToMove;
-    auto score = [&](const Move& m) -> int {
+    auto scoreMove = [&](const Move& m) -> int {
         if (ttMove && m.from==ttMove->from && m.to==ttMove->to) return 1'000'000;
         if (m.captured != NO_PIECE || m.enPassant) {
             int victim = (m.captured == NO_PIECE) ? SEE_VALUE[PAWN] : SEE_VALUE[m.captured];
@@ -181,15 +153,48 @@ void Engine::orderMoves(std::vector<Move>& moves, Board& board,
         if (m.from==killers[ply][1].from && m.to==killers[ply][1].to) return 70'000;
         return history[us][m.from][m.to];
     };
-    std::sort(moves.begin(), moves.end(),
-              [&](const Move& a, const Move& b){ return score(a) > score(b); });
+
+    // Score every move exactly once (SEE is too costly to recompute inside a sort
+    // comparator), then sort indices by the precomputed scores.
+    const int n = (int)moves.size();
+    std::vector<std::pair<int,int>> order;
+    order.reserve(n);
+    for (int i = 0; i < n; i++) order.emplace_back(scoreMove(moves[i]), i);
+    std::stable_sort(order.begin(), order.end(),
+                     [](const std::pair<int,int>& a, const std::pair<int,int>& b){
+                         return a.first > b.first;
+                     });
+    std::vector<Move> sorted;
+    sorted.reserve(n);
+    for (const auto& pr : order) sorted.push_back(moves[pr.second]);
+    moves.swap(sorted);
 }
 
 // ---- Quiescence search ----
-int Engine::quiescence(Board& board, int alpha, int beta) {
+int Engine::quiescence(Board& board, int alpha, int beta, int ply) {
     if (shouldStop()) return 0;
     nodesSearched++;
     if (board.isDraw()) return 0;
+    if (ply >= Board::MAX_DEPTH - 1) return eval.evaluate(board);
+
+    bool inCheck = moveGen.isInCheck(board, board.sideToMove);
+
+    if (inCheck) {
+        // In check there is no legal "pass", so we cannot stand pat — search all
+        // evasions instead, otherwise the horizon eval is illegally optimistic.
+        auto moves = moveGen.generateMoves(board);
+        if (moves.empty()) return -(MATE_SCORE - ply); // checkmate
+        orderMoves(moves, board, nullptr, ply);
+        for (auto& m : moves) {
+            if (shouldStop()) break;
+            board.makeMove(m);
+            int score = -quiescence(board, -beta, -alpha, ply + 1);
+            board.unmakeMove(m);
+            if (score >= beta) return beta;
+            if (score > alpha) alpha = score;
+        }
+        return alpha;
+    }
 
     int stand = eval.evaluate(board);
     if (stand >= beta) return beta;
@@ -198,7 +203,7 @@ int Engine::quiescence(Board& board, int alpha, int beta) {
     if (stand > alpha) alpha = stand;
 
     auto caps = moveGen.generateCaptures(board);
-    orderMoves(caps, board, nullptr, 0);
+    orderMoves(caps, board, nullptr, ply);
 
     for (auto& m : caps) {
         if (shouldStop()) break;
@@ -208,7 +213,7 @@ int Engine::quiescence(Board& board, int alpha, int beta) {
             if (see < -120) continue;
         }
         board.makeMove(m);
-        int score = -quiescence(board, -beta, -alpha);
+        int score = -quiescence(board, -beta, -alpha, ply + 1);
         board.unmakeMove(m);
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
@@ -222,6 +227,9 @@ int Engine::negamax(Board& board, int depth, int alpha, int beta, int ply, bool 
     nodesSearched++;
     if (board.isDraw()) return 0;
 
+    // Hard ply ceiling: bound recursion so killers/undo stacks can never overflow.
+    if (ply >= Board::MAX_DEPTH - 1) return eval.evaluate(board);
+
     bool inCheck = moveGen.isInCheck(board, board.sideToMove);
 
     // Check extension — don't stop at horizon while in check
@@ -233,14 +241,15 @@ int Engine::negamax(Board& board, int depth, int alpha, int beta, int ply, bool 
     if (tte) {
         ttMove = &tte->bestMove;
         if (tte->depth >= depth) {
-            if      (tte->flag == 0) return tte->score;
-            else if (tte->flag == 1) alpha = std::max(alpha, tte->score);
-            else                     beta  = std::min(beta,  tte->score);
-            if (alpha >= beta) return tte->score;
+            int ttScore = scoreFromTT(tte->score, ply);
+            if      (tte->flag == 0) return ttScore;
+            else if (tte->flag == 1) alpha = std::max(alpha, ttScore);
+            else                     beta  = std::min(beta,  ttScore);
+            if (alpha >= beta) return ttScore;
         }
     }
 
-    if (depth <= 0) return quiescence(board, alpha, beta);
+    if (depth <= 0) return quiescence(board, alpha, beta, ply);
 
     Color us = board.sideToMove;
 
@@ -283,24 +292,23 @@ int Engine::negamax(Board& board, int depth, int alpha, int beta, int ply, bool 
         if (futility && isQuiet && i > 0) continue;
 
         board.makeMove(m);
+        bool givesCheck = moveGen.isInCheck(board, board.sideToMove);
 
         int score;
         if (i == 0) {
             // First move: full window (PVS — expect this to be best)
             score = -negamax(board, depth - 1, -beta, -alpha, ply + 1, true);
         } else {
-            // LMR: reduce depth for late quiet moves
+            // LMR: reduce depth for late quiet moves — but never reduce checking
+            // moves (decided up front, so the reduced score is trustworthy).
             int reduction = 0;
-            if (isQuiet && !inCheck && depth >= 3 && i >= 3)
+            if (isQuiet && !inCheck && !givesCheck && depth >= 3 && i >= 3)
                 reduction = lmrTable[std::min(63, depth)][std::min(63, i)];
 
             // Null-window search at reduced depth
             score = -negamax(board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, true);
 
-            if (isQuiet && reduction > 0 && moveGen.isInCheck(board, board.sideToMove))
-                reduction = 0;
-
-            // If LMR failed high, re-search without reduction
+            // If LMR failed high, re-search at full depth
             if (reduction > 0 && score > alpha)
                 score = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1, true);
 
@@ -318,14 +326,14 @@ int Engine::negamax(Board& board, int depth, int alpha, int beta, int ply, bool 
                 storeKiller(m, ply);
                 history[(int)us][m.from][m.to] += depth * depth;
             }
-            ttStore(board.hash, depth, beta, 1, m);
+            ttStore(board.hash, depth, scoreToTT(beta, ply), 1, m);
             return beta;
         }
     }
 
     uint8_t flag = (bestScore <= origAlpha) ? 2 : 0;
     if (bestScore == -INF) return alpha;
-    ttStore(board.hash, depth, bestScore, flag, bestMove);
+    ttStore(board.hash, depth, scoreToTT(bestScore, ply), flag, bestMove);
     return bestScore;
 }
 
@@ -349,8 +357,8 @@ Move Engine::findBestMove(Board& board, int maxDepth, int maxTimeMs, long long m
     auto searchOneDepth = [&](int depth) -> bool {
         if (shouldStop()) return false;
         // Aspiration window (only from depth 5 up)
-        int alpha = (depth >= 5) ? prevScore - 50 : -INF;
-        int beta  = (depth >= 5) ? prevScore + 50 :  INF;
+        int windowAlpha = (depth >= 5) ? prevScore - 50 : -INF;
+        int windowBeta  = (depth >= 5) ? prevScore + 50 :  INF;
 
         Move iterBest  = rootMoves[0];
         int  iterScore = -INF;
@@ -360,6 +368,10 @@ Move Engine::findBestMove(Board& board, int maxDepth, int maxTimeMs, long long m
         do {
             research  = false;
             iterScore = -INF;
+            // Fresh search bounds each pass — the alpha that climbs during the move
+            // loop must not leak into a widened re-search.
+            int alpha = windowAlpha;
+            int beta  = windowBeta;
             orderMoves(rootMoves, board, &best, 0);
 
             for (int i = 0; i < (int)rootMoves.size(); i++) {
@@ -383,8 +395,8 @@ Move Engine::findBestMove(Board& board, int maxDepth, int maxTimeMs, long long m
 
             // Widen window if score fell outside (rare)
             if (depth >= 5) {
-                if (iterScore <= prevScore - 50)      { alpha = -INF; research = true; }
-                else if (iterScore >= prevScore + 50) { beta  =  INF; research = true; }
+                if (iterScore <= windowAlpha)     { windowAlpha = -INF; research = true; }
+                else if (iterScore >= windowBeta) { windowBeta  =  INF; research = true; }
             }
         } while (research && !shouldStop());
 

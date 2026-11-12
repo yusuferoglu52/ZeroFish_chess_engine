@@ -27,6 +27,75 @@ static std::string moveName(const Move& m) {
     return s;
 }
 
+// ---- Perft: validates move generation + make/unmake against known node counts ----
+static long long perft(MoveGenerator& gen, Board& b, int depth) {
+    if (depth == 0) return 1;
+    auto moves = gen.generateMoves(b);
+    if (depth == 1) return (long long)moves.size();
+    long long nodes = 0;
+    for (auto& m : moves) {
+        b.makeMove(m);
+        nodes += perft(gen, b, depth - 1);
+        b.unmakeMove(m);
+    }
+    return nodes;
+}
+
+struct PerftCase { const char* fen; int depth; long long expected; const char* name; };
+
+static int runPerft() {
+    static const PerftCase cases[] = {
+        {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",                 5, 4865609LL, "Startpos d5"},
+        {"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",     4, 4085603LL, "Kiwipete d4"},
+        {"8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",                               5,  674624LL, "Position 3 d5"},
+        {"r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",        4,  422333LL, "Position 4 d4"},
+        {"rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",               3,   62379LL, "Position 5 d3"},
+    };
+    MoveGenerator gen;
+    int passed = 0;
+    const int total = (int)(sizeof(cases) / sizeof(cases[0]));
+    std::cout << "== Perft ==\n";
+    for (const auto& c : cases) {
+        Board b;
+        b.parseFEN(c.fen);
+        auto t0 = std::chrono::high_resolution_clock::now();
+        long long got = perft(gen, b, c.depth);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        bool ok = (got == c.expected);
+        passed += ok ? 1 : 0;
+        std::cout << (ok ? "[OK] " : "[XX] ") << c.name
+                  << " got " << got << " expected " << c.expected
+                  << " (" << (long long)ms << " ms)\n";
+    }
+    std::cout << "Perft: " << passed << "/" << total << " passed\n";
+    return (passed == total) ? 0 : 1;
+}
+
+// Positions with tactical tension (hanging/defended pieces, both sides to move)
+// so the eval-equivalence check actually exercises evalThreats in both directions.
+static const char* kEvalFens[] = {
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 b - - 0 1",
+    "2r2rk1/1bqnbppp/p3pn2/1p2N3/3P4/1BN1P3/PPQ2PPP/2RR2K1 w - - 0 18",
+    "r2q1rk1/pp2bppp/2n1pn2/2bp4/2P5/2NP1NP1/PP2PPBP/R1BQ1RK1 b - - 0 10",
+    "rnb1kbnr/pp1ppppp/8/q1p5/8/2N5/PPPPPPPP/R1BQKBNR w KQkq - 2 3",
+    "4k3/8/8/3qQ3/8/8/8/4K3 w - - 0 1",
+};
+
+static void runEval() {
+    Evaluator ev;
+    std::cout << "== Eval (side-to-move perspective) ==\n";
+    const int n = (int)(sizeof(kEvalFens) / sizeof(kEvalFens[0]));
+    for (int i = 0; i < n; i++) {
+        Board b;
+        b.parseFEN(kEvalFens[i]);
+        std::cout << i << ": " << ev.evaluate(b) << "\n";
+    }
+}
+
 static const SuitePos kBenchSuite[] = {
     {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "Start", ""},
     {"r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4", "Italian", ""},
@@ -211,13 +280,15 @@ int main(int argc, char** argv) {
     Engine engine;
     engine.verbose = false;
 
-    bool doBench = false, doReg = false, doTune = false, doValidateBook = false;
+    bool doBench = false, doReg = false, doTune = false, doValidateBook = false, doPerft = false, doEval = false;
     int timeMs = 1200;
     long long nodes = 600000;
     int depth = 0; // 0 => auto
     std::string bookPath = "assets/openings.book";
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--bench") == 0) doBench = true;
+        else if (std::strcmp(argv[i], "--perft") == 0) doPerft = true;
+        else if (std::strcmp(argv[i], "--eval") == 0) doEval = true;
         else if (std::strcmp(argv[i], "--regress") == 0) doReg = true;
         else if (std::strcmp(argv[i], "--tune") == 0) doTune = true;
         else if (std::strcmp(argv[i], "--validate-book") == 0) doValidateBook = true;
@@ -232,12 +303,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!doBench && !doReg && !doTune && !doValidateBook) {
-        std::cout << "Usage: chess_engine [--bench] [--regress] [--tune] [--validate-book]"
+    if (!doBench && !doReg && !doTune && !doValidateBook && !doPerft && !doEval) {
+        std::cout << "Usage: chess_engine [--perft] [--eval] [--bench] [--regress] [--tune] [--validate-book]"
                   << " [--time ms] [--nodes n] [--depth d] [--book-file path]\n";
         std::cout << "Default quick run:\n";
         runBench(engine, 1000, 500000);
         return 0;
+    }
+
+    if (doEval) {
+        runEval();
+        if (!doBench && !doReg && !doTune && !doValidateBook && !doPerft) return 0;
+    }
+
+    if (doPerft) {
+        int rc = runPerft();
+        if (!doBench && !doReg && !doTune && !doValidateBook) return rc;
     }
 
     if (doValidateBook) {

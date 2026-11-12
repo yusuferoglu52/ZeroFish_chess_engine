@@ -51,10 +51,8 @@ private:
 
     // Negamax + PVS + LMR + null move + check extension
     int negamax(Board& board, int depth, int alpha, int beta, int ply, bool canNull = true);
-    int quiescence(Board& board, int alpha, int beta);
+    int quiescence(Board& board, int alpha, int beta, int ply);
     int seeCapture(Board& board, const Move& m);
-    bool attacksSquare(const Board& board, int from, PieceType pt, Color side, int target) const;
-    bool isLegalRecapture(Board& board, const Move& m, Color side);
     bool hasNonPawnMaterial(const Board& board, Color side) const;
 
     // Move ordering

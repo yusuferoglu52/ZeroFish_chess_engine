@@ -143,36 +143,50 @@ uint64_t Evaluator::bishopAtk(int s, uint64_t occ) const {
     return rayAtk(s,occ,1,1)|rayAtk(s,occ,-1,1)|rayAtk(s,occ,1,-1)|rayAtk(s,occ,-1,-1);
 }
 
-bool Evaluator::isSquareAttacked(const Board& b, int s, Color by) const {
-    const int f = ::file(s);
-    const int r = rank(s);
+// Union of every square attacked by 'by'. Equivalent (for any non-attacker square)
+// to calling the old per-square isSquareAttacked, but computed once instead of once
+// per piece per phase — sliding/knight/king attacks are symmetric and the pawn sets
+// are explicit, so threat membership tests stay bit-identical.
+uint64_t Evaluator::allAttacks(const Board& b, Color by) const {
     const uint64_t occ = b.allOccupied;
+    uint64_t att = 0;
 
-    // Pawn attacks
+    // Pawns
+    uint64_t p = b.pieces[by][PAWN];
     if (by == WHITE) {
-        if (f > 0 && r > 0 && (b.pieces[WHITE][PAWN] & bit(s - 9))) return true;
-        if (f < 7 && r > 0 && (b.pieces[WHITE][PAWN] & bit(s - 7))) return true;
+        att |= (p & ~fileMask[0]) << 7;   // up-left
+        att |= (p & ~fileMask[7]) << 9;   // up-right
     } else {
-        if (f > 0 && r < 7 && (b.pieces[BLACK][PAWN] & bit(s + 7))) return true;
-        if (f < 7 && r < 7 && (b.pieces[BLACK][PAWN] & bit(s + 9))) return true;
+        att |= (p & ~fileMask[0]) >> 9;   // down-left
+        att |= (p & ~fileMask[7]) >> 7;   // down-right
     }
 
-    // Knight attacks
-    if (knightAtk[s] & b.pieces[by][KNIGHT]) return true;
+    // Knights
+    uint64_t n = b.pieces[by][KNIGHT];
+    while (n) att |= knightAtk[popLSB(n)];
 
-    // Sliding attacks
-    if (bishopAtk(s, occ) & (b.pieces[by][BISHOP] | b.pieces[by][QUEEN])) return true;
-    if (rookAtk(s, occ) & (b.pieces[by][ROOK] | b.pieces[by][QUEEN])) return true;
+    // Bishops + queens (diagonal)
+    uint64_t bq = b.pieces[by][BISHOP] | b.pieces[by][QUEEN];
+    while (bq) att |= bishopAtk(popLSB(bq), occ);
 
-    // King attacks
-    uint64_t king = b.pieces[by][KING];
-    if (king) {
-        int ks = popLSB(king);
-        int df = std::abs(::file(ks) - f);
-        int dr = std::abs(rank(ks) - r);
-        if (df <= 1 && dr <= 1) return true;
+    // Rooks + queens (orthogonal)
+    uint64_t rq = b.pieces[by][ROOK] | b.pieces[by][QUEEN];
+    while (rq) att |= rookAtk(popLSB(rq), occ);
+
+    // King
+    uint64_t k = b.pieces[by][KING];
+    if (k) {
+        int ks = lsb(k);
+        int kf = ::file(ks), kr = rank(ks);
+        for (int df = -1; df <= 1; df++)
+            for (int dr = -1; dr <= 1; dr++) {
+                if (!df && !dr) continue;
+                int nf = kf + df, nr = kr + dr;
+                if (nf >= 0 && nf < 8 && nr >= 0 && nr < 8)
+                    att |= bit(::sq(nf, nr));
+            }
     }
-    return false;
+    return att;
 }
 
 // ============================================================
@@ -389,7 +403,7 @@ int Evaluator::evalOutposts(const Board& b, Color c) const {
     return score;
 }
 
-int Evaluator::evalThreats(const Board& b, Color c) const {
+int Evaluator::evalThreats(const Board& b, Color c, uint64_t attByC, uint64_t attByThem) const {
     int score = 0;
     Color them = (Color)(1-c);
     static constexpr int THREAT_W[6]  = { 6, 14, 14, 22, 36, 0};
@@ -401,9 +415,8 @@ int Evaluator::evalThreats(const Board& b, Color c) const {
         int s = popLSB(enemyPieces);
         int pt = b.pieceOn[s];
         if (pt < PAWN || pt > QUEEN) continue;
-        bool attacked = isSquareAttacked(b, s, c);
-        if (!attacked) continue;
-        bool defended = isSquareAttacked(b, s, them);
+        if (!(attByC & bit(s))) continue;          // attacked by us?
+        bool defended = (attByThem & bit(s)) != 0; // defended by them?
         score += defended ? THREAT_W[pt] : HANGING_W[pt];
     }
 
@@ -413,9 +426,8 @@ int Evaluator::evalThreats(const Board& b, Color c) const {
         int s = popLSB(ownPieces);
         int pt = b.pieceOn[s];
         if (pt < PAWN || pt > QUEEN) continue;
-        bool attacked = isSquareAttacked(b, s, them);
-        if (!attacked) continue;
-        bool defended = isSquareAttacked(b, s, c);
+        if (!(attByThem & bit(s))) continue;       // attacked by them?
+        bool defended = (attByC & bit(s)) != 0;    // defended by us?
         score -= defended ? (THREAT_W[pt] / 2) : (HANGING_W[pt] * 2 / 3);
     }
     return score;
@@ -448,6 +460,9 @@ int Evaluator::evalSpace(const Board& b, Color c) const {
 int Evaluator::evaluate(const Board& b) const {
     int phase = calcPhase(b);
     int mg = 0, eg = 0;
+
+    // Full attack bitboards, computed once and reused for both colors' threat terms.
+    const uint64_t att[2] = { allAttacks(b, WHITE), allAttacks(b, BLACK) };
 
     for (int c = 0; c < 2; c++) {
         int sign = (c == (int)b.sideToMove) ? 1 : -1;
@@ -494,7 +509,7 @@ int Evaluator::evaluate(const Board& b) const {
         mg += sign * out;
         eg += sign * (out / 2);
 
-        int thr = evalThreats(b, (Color)c);
+        int thr = evalThreats(b, (Color)c, att[c], att[1 - c]);
         mg += sign * thr;
         eg += sign * (thr / 2);
 

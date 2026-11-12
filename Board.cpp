@@ -133,7 +133,9 @@ int Board::kingSquare(Color c) const {
 
 bool Board::isThreefoldRepetition() const {
     int matches = 1; // current position
-    for (int i = 0; i < undoTop; i++) {
+    // Only same-side-to-move positions can repeat (step 2), and nothing before the
+    // last irreversible move (capture/pawn push) can match — bound by halfmoveClock.
+    for (int i = undoTop - 2; i >= 0 && (undoTop - i) <= halfmoveClock; i -= 2) {
         if (undoStack[i].hash == hash) {
             matches++;
             if (matches >= 3) return true;
@@ -232,10 +234,19 @@ void Board::makeMove(const Move& m) {
         putPiece(us,landing,m.to);
         if (movingPt==PAWN) {
             halfmoveClock=0;
-            // Set EP square for double push
+            // Set EP square on a double push only when an enemy pawn can actually
+            // capture en passant. Hashing a "phantom" EP square otherwise splits
+            // identical positions across TT slots and breaks repetition detection.
             if (abs(m.to-m.from)==16) {
-                enPassantSquare=(m.from+m.to)/2;
-                hash^=zEP[::file(enPassantSquare)];
+                int tf = ::file(m.to);
+                uint64_t enemyPawns = pieces[them][PAWN];
+                bool capturable =
+                    (tf > 0 && (enemyPawns & bit(m.to-1))) ||
+                    (tf < 7 && (enemyPawns & bit(m.to+1)));
+                if (capturable) {
+                    enPassantSquare=(m.from+m.to)/2;
+                    hash^=zEP[::file(enPassantSquare)];
+                }
             }
         }
     }

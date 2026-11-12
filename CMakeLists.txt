@@ -28,11 +28,18 @@ if(NOT MSVC)
     target_compile_options(chess_core PRIVATE -mpopcnt -mbmi)
 endif()
 
-# CLI executable
+# CLI executable (bench / regress / tune / perft)
 add_executable(chess_engine main.cpp)
 target_link_libraries(chess_engine PRIVATE chess_core)
 if(NOT MSVC)
     target_compile_options(chess_engine PRIVATE -mpopcnt -mbmi)
+endif()
+
+# UCI executable (headless protocol front-end for GUIs / strength testing)
+add_executable(chess_uci uci.cpp)
+target_link_libraries(chess_uci PRIVATE chess_core)
+if(NOT MSVC)
+    target_compile_options(chess_uci PRIVATE -mpopcnt -mbmi)
 endif()
 
 # GUI executable (requires SFML 3)
